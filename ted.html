@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>听写排序练习（粘贴原文 | 断点续练 | 错题本 | 查词 | TTS | 自动翻译）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#111; --muted:#6b7280; --card:#f3f4f6; --ok:#dcfce7; --okb:#86efac; --bad:#fee2e2; --badb:#fca5a5; }
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,"PingFang SC","Microsoft Yahei",sans-serif;}
+  main{max-width:980px;margin:24px auto;padding:0 16px;}
+  h2{margin:0 0 8px;}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 12px;}
+  .btn{padding:8px 12px;border:1px solid #e5e7eb;background:#fff;border-radius:10px;cursor:pointer}
+  .btn:hover{background:#f3f4f6}
+  .btn.primary{background:#111827;color:#fff;border-color:#111827}
+  .btn.primary:hover{background:#000}
+  .small{font-size:13px;color:var(--muted)}
+  .ipt{padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;min-width:120px}
+  .word-list{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px;min-height:52px}
+  .word-item{padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;background:#f9fafb;cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+  .word-item.correct{background:var(--ok);border-color:var(--okb)}
+  .word-item.wrong{background:var(--bad);border-color:var(--badb)}
+  #translation{margin-top:8px;padding:10px;background:var(--card);border-radius:8px}
+  #translation.hidden{display:none}
+  #feedback{margin-top:8px}
+  #dictBox{position:fixed;bottom:20px;right:20px;z-index:9999;background:#fff;border:1px solid #d1d5db;padding:12px 14px;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.12);max-width:360px;display:none}
+  #dictBox h4{margin:0 0 6px;font-size:14px}
+  #dictBox p{margin:0;font-size:14px}
+  /* modal */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:9998}
+  .panel{width:min(92%,960px);background:#fff;border-radius:12px;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.18)}
+  .panel h3{margin:0 0 8px}
+  .grid{display:grid;grid-template-columns:1fr 260px;gap:12px}
+  .ta{width:100%;min-height:280px;padding:10px;border:1px solid #d1d5db;border-radius:10px}
+  .card{background:var(--card);padding:10px;border-radius:10px}
+  .list{display:flex;flex-wrap:wrap;gap:6px}
+  .pill{padding:4px 8px;background:#fff;border:1px solid #e5e7eb;border-radius:100px}
+  .select{min-width:220px}
+</style>
+</head>
+<body>
+<main>
+  <h2>听写排序练习（浏览器版）</h2>
+
+  <div class="row">
+    <span id="progress" class="small">—</span>
+    <button class="btn" id="btnPlay">🔊 播放句子</button>
+    <button class="btn" id="btnToggleCn">显示/隐藏翻译</button>
+    <button class="btn" id="btnReshuffle">重置本句</button>
+    <button class="btn primary" id="btnCheck">检查答案</button>
+    <button class="btn" id="btnNext">下一句 ➜</button>
+  </div>
+
+  <div class="row">
+    <input id="jumpInput" class="ipt" type="number" min="1" step="1" placeholder="起始序号…" />
+    <button class="btn" id="btnJump">跳转</button>
+    <button class="btn" id="btnResume">继续上次</button>
+    <button class="btn" id="btnClear">清除本地进度</button>
+    <button class="btn" id="btnReview">复习错题</button>
+    <button class="btn" id="btnExitReview">退出错题复习</button>
+  </div>
+
+  <div class="row">
+    <button class="btn" id="btnNew">＋ 粘贴新原文</button>
+    <select id="passageSelect" class="ipt select"></select>
+    <button class="btn" id="btnLoadPassage">加载选中稿件</button>
+    <button class="btn" id="btnDeletePassage">删除选中稿件</button>
+    <button class="btn" id="btnLoadBuiltin" style="display:none">加载内置稿件</button>
+  </div>
+
+  <ul id="wordList" class="word-list"></ul>
+  <div id="translation" class="hidden"></div>
+  <div id="feedback" class="small"></div>
+
+  <div id="dictBox">
+    <h4 id="dictWord">word</h4>
+    <p id="dictMeaning">meaning</p>
+  </div>
+</main>
+
+<!-- 可选：若同目录存在 data.js（window.sentences），下面这行会起作用 -->
+<script src="data.js" onerror="/* optional */"></script>
+
+<script>
+/* ========= 配置 ========= */
+const MAX_WORDS = 18;               // 每段最多单词数，超出会进一步分块
+const STORE_PREFIX = "dict_train_v4_";
+
+/* ========= 状态 ========= */
+let units = [];          // [{en, cn}]
+let appData = [];        // 当前数据源（全文或错题集）
+let currentIndex = 0;
+let attempt = 0;
+let inReview = false;
+let wrongUnits = [];
+let selectedVoice = null;
+let passageKey = "default"; // 当前稿件的存储键
+let isTranslating = false;  // 避免重复请求
+
+/* ========= DOM ========= */
+const wordListEl = document.getElementById('wordList');
+const feedbackEl = document.getElementById('feedback');
+const translationEl = document.getElementById('translation');
+const progressEl = document.getElementById('progress');
+const jumpInput = document.getElementById('jumpInput');
+const dictBox = document.getElementById('dictBox');
+const dictWord = document.getElementById('dictWord');
+const dictMeaning = document.getElementById('dictMeaning');
+const passageSelect = document.getElementById('passageSelect');
+const btnLoadBuiltin = document.getElementById('btnLoadBuiltin');
+const btnToggleCn = document.getElementById('btnToggleCn');
+
+/* ========= 词典（本地优先，在线兜底） ========= */
+const localDict = {
+  "Chilean":"智利的","hostel":"旅馆","underwear":"内衣；内裤","drilled":"被灌输的；被训练的",
+  "conflating":"混同；混淆","identity":"身份；认同","labor":"劳动的；工会的","portfolio":"投资组合",
+  "Shabbat":"安息日（犹太教）","sanctuary":"圣所；庇护所","synagogue":"犹太教堂",
+  "ultramarathon":"超级马拉松","pickup":"野球；临时组队的","unceremoniously":"不客气地；毫不客气地",
+  "recession":"经济衰退","layoff":"裁员","resume":"简历","burnout":"职业倦怠"
+};
+
+/* ========= 工具 ========= */
+function shuffle(arr){ return arr.map(v=>[Math.random(),v]).sort((a,b)=>a[0]-b[0]).map(p=>p[1]); }
+function cleanWord(w){ return w.replace(/^[^A-Za-z]+|[^A-Za-z]+$/g,""); }
+function hash(s){ let h=0; for (let i=0;i<s.length;i++) h = (h*131 + s.charCodeAt(i)) >>> 0; return h.toString(16); }
+function saveJSON(key, obj){ localStorage.setItem(key, JSON.stringify(obj)); }
+function loadJSON(key, def){ try { const s=localStorage.getItem(key); return s?JSON.parse(s):def; } catch { return def; } }
+
+/* ========= 智能切句 & 分块 ========= */
+function splitByRegex(text, rx) {
+  const r = new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : rx.flags + 'g');
+  let res = [], last = 0, m;
+  while ((m = r.exec(text)) !== null) {
+    const piece = text.slice(last, m.index).trim();
+    if (piece) res.push(piece);
+    last = r.lastIndex;
+  }
+  const tail = text.slice(last).trim();
+  if (tail) res.push(tail);
+  return res;
+}
+function chunkByWords(text, n) {
+  const ws = text.trim().split(/\s+/);
+  if (ws.length <= n) return [text.trim()];
+  const out = [];
+  for (let i=0;i<ws.length;i+=n) out.push(ws.slice(i,i+n).join(' '));
+  return out;
+}
+function smartSplitEN(en) {
+  en = en.trim();
+  let out = [en];
+  const splitters = [
+    /[;:]\s+/g,                        // 分号/冒号
+    /(?:—|–|-)\s+/g,                   // 破折号/短横
+    /,\s+/g,                           // 逗号
+    /\s+(?:however|therefore|moreover|instead|rather)\s+/gi,
+    /\s+(?:and|but|so|because|although|though|when|while|which|who|that)\s+/gi
+  ];
+  for (const rx of splitters) {
+    out = out.flatMap(seg => splitByRegex(seg, rx));
+    if (out.every(seg => seg.split(/\s+/).length <= MAX_WORDS)) break;
+  }
+  out = out.flatMap(seg => chunkByWords(seg, MAX_WORDS));
+  return out.filter(Boolean);
+}
+function smartSplitCN(cn, targetLen) {
+  const cnParts = cn ? cn.split(/[，；：、———\-]/).map(s => s.trim()).filter(Boolean) : [];
+  if (cnParts.length === targetLen) return cnParts;
+  return Array(targetLen).fill(cn || "");
+}
+
+/* ========= 数据构建 ========= */
+function buildUnitsFromSentences(list){
+  const out = [];
+  list.forEach(({en, cn})=>{
+    const enParts = smartSplitEN(en);
+    const cnParts = smartSplitCN(cn, enParts.length);
+    enParts.forEach((seg,i)=> out.push({ en: seg, cn: cnParts[i] || cn || "" }));
+  });
+  return out;
+}
+function buildUnitsFromRawText(raw){
+  const paras = raw.replace(/\r/g,'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  const list = [];
+  paras.forEach(p=>{
+    const sents = p.split(/(?<=[\.!?])\s+/);
+    sents.forEach(s=>{
+      if (!s) return;
+      const parts = smartSplitEN(s);
+      parts.forEach(part=>{
+        const chunks = chunkByWords(part, MAX_WORDS);
+        chunks.forEach(c => list.push({ en: c, cn: "" }));
+      });
+    });
+  });
+  return list;
+}
+
+/* ========= 渲染 & 交互 ========= */
+function renderSentence() {
+  attempt = 0;
+  feedbackEl.textContent = "";
+  const cur = appData[currentIndex] || {en:"",cn:""};
+  translationEl.textContent = cur.cn || "(此段暂无翻译)";
+  translationEl.classList.add("hidden");
+
+  wordListEl.innerHTML = "";
+  const scrambled = shuffle(cur.en.split(/\s+/));
+  scrambled.forEach(w=>{
+    const li = document.createElement('li');
+    li.className = "word-item";
+    li.textContent = w;
+    li.onclick = () => showDefinition(cleanWord(w));
+    wordListEl.appendChild(li);
+  });
+  new Sortable(wordListEl, {
+    animation:160,
+    delay:120,
+    delayOnTouchOnly:true,
+    touchStartThreshold:4,
+    fallbackOnBody:true
+  });
+
+  progressEl.textContent = `第 ${currentIndex+1} 段 / 共 ${appData.length} 段${inReview ? "（错题复习）":""}（当前稿件：${getPassageName(passageKey)}）`;
+  saveProgress();
+}
+
+// 改造：显示/隐藏翻译 —— 若无中文则自动在线翻译并缓存
+async function toggleTranslation(){
+  if (translationEl.classList.contains("hidden")) {
+    // 准备显示：若当前句没有翻译，尝试在线翻译
+    const cur = appData[currentIndex];
+    if (cur && !cur.cn && !isTranslating) {
+      isTranslating = true;
+      btnToggleCn.disabled = true;
+      translationEl.textContent = "（正在翻译…）";
+      translationEl.classList.remove("hidden");
+      try {
+        const cn = await translateEN2ZH(cur.en);
+        if (cn) {
+          setCurrentCN(cn); // 写回本句并保存
+          translationEl.textContent = cn;
+        } else {
+          translationEl.textContent = "（暂时无法翻译）";
+        }
+      } catch(e){
+        translationEl.textContent = "（翻译出错）";
+      } finally {
+        isTranslating = false;
+        btnToggleCn.disabled = false;
+      }
+      return;
+    }
+  }
+  translationEl.classList.toggle("hidden");
+}
+
+// 把翻译结果写回到 units / appData / wrongUnits，并保存
+function setCurrentCN(cn){
+  const cur = appData[currentIndex];
+  if (!cur) return;
+  cur.cn = cn;
+  // 同步到 units 中的对应句（按 en 匹配；若重复文本将同步首个匹配）
+  const u = units.find(x => x.en === cur.en);
+  if (u) u.cn = cn;
+  // 同步错题表里（引用同对象通常已同步；这里冗余保障）
+  wrongUnits.forEach(x=>{ if (x.en === cur.en) x.cn = cn; });
+  saveProgress();
+}
+
+/* ========= 在线翻译：EN → ZH（浏览器可直接用的免费接口） ========= */
+async function translateEN2ZH(text){
+  // 1) MyMemory（免费、CORS 允许；有速率/质量限制）
+  try {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|zh-CN`;
+    const res = await fetch(url);
+    const j = await res.json();
+    const cn = j?.responseData?.translatedText;
+    if (cn) return cn;
+  } catch(e){}
+  // 2) 兜底：直接返回空，界面会提示
+  return "";
+}
+
+function playSentence() {
+  const cur = appData[currentIndex];
+  if (!cur) return;
+  const u = new SpeechSynthesisUtterance(cur.en);
+  u.lang  = selectedVoice?.lang || 'en-US';
+  u.voice = selectedVoice || null;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+function reshuffle(){ renderSentence(); }
+function checkAnswer() {
+  attempt++;
+  const user = Array.from(document.querySelectorAll('.word-item')).map(el=>el.textContent).join(" ");
+  const correct = appData[currentIndex].en;
+  if (user === correct) {
+    feedbackEl.textContent = "✅ 正确！";
+    document.querySelectorAll('.word-item').forEach(el=>el.classList.add('correct'));
+  } else {
+    if (attempt === 1) {
+      feedbackEl.textContent = "❌ 有错误，请再试一次。";
+      document.querySelectorAll('.word-item').forEach(el=>el.classList.add('wrong'));
+    } else {
+      feedbackEl.textContent = "答案已显示。";
+      wordListEl.innerHTML = "";
+      correct.split(/\s+/).forEach(w=>{
+        const li=document.createElement('li');
+        li.className="word-item correct";
+        li.textContent=w;
+        li.onclick=()=>showDefinition(cleanWord(w));
+        wordListEl.appendChild(li);
+      });
+      const cur = appData[currentIndex];
+      if (!wrongUnits.some(s=>s.en===cur.en)) wrongUnits.push(cur);
+      saveProgress();
+    }
+  }
+}
+function nextSentence(){
+  currentIndex++;
+  if (currentIndex >= appData.length) { feedbackEl.textContent = inReview ? "✅ 错题复习完成！" : "🎉 全文练习完成！"; saveProgress(); return; }
+  renderSentence();
+}
+function jumpTo(){
+  const v = parseInt(jumpInput.value,10);
+  if (isNaN(v)) return;
+  currentIndex = Math.min(Math.max(0, v-1), appData.length-1);
+  renderSentence();
+}
+function enterReview(){
+  if (wrongUnits.length===0){ feedbackEl.textContent="👏 目前没有错题可复习。"; return; }
+  inReview = true; appData = wrongUnits.slice(); currentIndex=0;
+  feedbackEl.textContent="🔁 已进入错题复习模式。"; renderSentence();
+}
+function exitReview(){
+  if (!inReview){ feedbackEl.textContent="当前不在错题复习模式。"; return; }
+  inReview=false; appData=units; currentIndex=0;
+  feedbackEl.textContent="↩️ 已返回全文模式。"; renderSentence();
+}
+
+/* ========= 进度 / 稿件管理 ========= */
+function storeKey(){ return STORE_PREFIX + passageKey; }
+function saveProgress(){
+  const payload = {
+    index: currentIndex,
+    total: appData.length,
+    inReview,
+    wrong: wrongUnits,
+    units
+  };
+  saveJSON(storeKey(), payload);
+  const list = loadJSON(STORE_PREFIX + "list", []);
+  if (!list.find(x=>x.key===passageKey)) {
+    list.push({ key: passageKey, name: getPassageName(passageKey), time: Date.now() });
+    saveJSON(STORE_PREFIX + "list", list);
+    refreshPassageSelect();
+  }
+}
+function resumeSaved(){
+  const saved = loadJSON(storeKey(), null);
+  if (!saved){ feedbackEl.textContent="尚无该稿件的保存进度。"; return; }
+  inReview = !!saved.inReview;
+  wrongUnits = Array.isArray(saved.wrong) ? saved.wrong : [];
+  units = Array.isArray(saved.units) ? saved.units : units;
+  appData = inReview && wrongUnits.length ? wrongUnits : units;
+  currentIndex = Math.min(Math.max(0, saved.index || 0), appData.length-1);
+  feedbackEl.textContent="已恢复到上次进度。";
+  renderSentence();
+}
+function clearProgress(){
+  localStorage.removeItem(storeKey());
+  feedbackEl.textContent="已清除本地进度（当前稿件）。";
+}
+function getPassageName(key){
+  if (key==="default") return "默认";
+  const list = loadJSON(STORE_PREFIX + "list", []);
+  return (list.find(x=>x.key===key)?.name) || ("稿件-"+key.slice(0,6));
+}
+function refreshPassageSelect(){
+  const list = loadJSON(STORE_PREFIX + "list", []);
+  passageSelect.innerHTML = "";
+  list.forEach(item=>{
+    const opt = document.createElement('option');
+    opt.value = item.key; opt.textContent = item.name;
+    if (item.key === passageKey) opt.selected = true;
+    passageSelect.appendChild(opt);
+  });
+}
+
+/* ========= 词典 ========= */
+async function showDefinition(word){
+  if (!word) return;
+  dictWord.textContent = word;
+  if (localDict[word]) {
+    dictMeaning.textContent = localDict[word];
+    dictBox.style.display = "block"; return;
+  }
+  try {
+    const res = await fetch(`https://dict.youdao.com/suggest?doctype=json&q=${encodeURIComponent(word)}`);
+    const data = await res.json();
+    const exp = data?.result?.entries?.[0]?.explain;
+    if (exp){ dictMeaning.textContent = exp; dictBox.style.display = "block"; return; }
+  } catch(e){}
+  try {
+    const r = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+    const j = await r.json();
+    const def = j?.[0]?.meanings?.[0]?.definitions?.[0]?.definition;
+    if (def){ dictMeaning.innerHTML = `英英：${def}`; dictBox.style.display = "block"; return; }
+  } catch(e){}
+  dictMeaning.textContent = "（未查询到释义）";
+  dictBox.style.display = "block";
+}
+
+/* ========= 语音 ========= */
+function initVoices() {
+  const vs = speechSynthesis.getVoices();
+  if (!vs || !vs.length) return;
+  selectedVoice =
+    vs.find(v => /male/i.test(v.name) && v.lang?.startsWith('en')) ||
+    vs.find(v => v.name === 'Alex') ||
+    vs.find(v => v.lang === 'en-US') ||
+    vs.find(v => v.lang?.startsWith('en')) ||
+    vs[0];
+}
+initVoices();
+if ('onvoiceschanged' in speechSynthesis) speechSynthesis.onvoiceschanged = initVoices;
+
+/* ========= 粘贴新原文：UI ========= */
+const mask = document.createElement('div'); mask.className = "mask"; document.body.appendChild(mask);
+mask.innerHTML = `
+  <div class="panel">
+    <h3>粘贴新的英文原文</h3>
+    <div class="grid">
+      <textarea id="taRaw" class="ta" placeholder="在此粘贴英文讲稿/文章（可多段）"></textarea>
+      <div>
+        <div class="card">
+          <div class="small">设置</div>
+          <div class="list" style="margin-top:6px">
+            <span class="pill">最大单词数：<input id="maxWordsIpt" class="ipt" type="number" value="${MAX_WORDS}" style="width:80px"></span>
+          </div>
+          <div class="small" style="margin-top:6px">命名此稿件：</div>
+          <input id="nameIpt" class="ipt" placeholder="例如：My Talk 2025-09-01" style="width:100%;margin-top:6px"/>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="btnPaste">从剪贴板粘贴</button>
+          <button class="btn" id="btnCancel">取消</button>
+          <button class="btn primary" id="btnBuild">生成练习</button>
+        </div>
+      </div>
+    </div>
+  </div>
+`;
+function openNewModal(){ mask.style.display = "flex"; }
+function closeNewModal(){ mask.style.display = "none"; }
+
+/* ========= 稿件装载 ========= */
+function loadUnits(u, key, nameOpt){
+  units = u.slice();
+  appData = units;
+  wrongUnits = [];
+  inReview = false;
+  currentIndex = 0;
+  passageKey = key;
+  if (nameOpt){
+    const list = loadJSON(STORE_PREFIX + "list", []);
+    const hit = list.find(x=>x.key===key);
+    if (hit) { hit.name = nameOpt; hit.time = Date.now(); }
+    else { list.push({ key, name:nameOpt, time:Date.now() }); }
+    saveJSON(STORE_PREFIX + "list", list);
+  }
+  refreshPassageSelect();
+  renderSentence();
+}
+function loadBuiltinIfAny(){
+  if (window.sentences && Array.isArray(window.sentences) && window.sentences.length){
+    btnLoadBuiltin.style.display = "inline-block";
+    btnLoadBuiltin.onclick = ()=>{
+      const u = buildUnitsFromSentences(window.sentences);
+      const key = "builtin_" + (hash(JSON.stringify(window.sentences)).slice(0,8));
+      loadUnits(u, key, "内置稿件");
+    };
+  }
+}
+
+/* ========= 事件绑定 ========= */
+document.getElementById('btnPlay').onclick = playSentence;
+btnToggleCn.onclick = toggleTranslation;
+document.getElementById('btnReshuffle').onclick = reshuffle;
+document.getElementById('btnCheck').onclick = checkAnswer;
+document.getElementById('btnNext').onclick = nextSentence;
+document.getElementById('btnJump').onclick = jumpTo;
+document.getElementById('btnReview').onclick = enterReview;
+document.getElementById('btnExitReview').onclick = exitReview;
+document.getElementById('btnResume').onclick = resumeSaved;
+document.getElementById('btnClear').onclick = clearProgress;
+document.getElementById('btnNew').onclick = openNewModal;
+document.getElementById('btnLoadPassage').onclick = ()=>{
+  const key = passageSelect.value;
+  if (!key) return;
+  const saved = loadJSON(STORE_PREFIX + key, null);
+  if (saved && Array.isArray(saved.units)) {
+    passageKey = key;
+    units = saved.units;
+    appData = units;
+    wrongUnits = saved.wrong || [];
+    inReview = !!saved.inReview;
+    currentIndex = Math.min(saved.index||0, units.length-1);
+    renderSentence();
+  }
+};
+document.getElementById('btnDeletePassage').onclick = ()=>{
+  const key = passageSelect.value;
+  if (!key) return;
+  localStorage.removeItem(STORE_PREFIX + key);
+  const list = loadJSON(STORE_PREFIX + "list", []).filter(x=>x.key!==key);
+  saveJSON(STORE_PREFIX + "list", list);
+  if (key === passageKey) { passageKey = "default"; units=[]; appData=[]; wrongUnits=[]; inReview=false; currentIndex=0; feedbackEl.textContent="已删除该稿件。"; }
+  refreshPassageSelect();
+};
+document.getElementById('btnPaste').onclick = async ()=>{
+  try {
+    const txt = await navigator.clipboard.readText();
+    document.getElementById('taRaw').value = txt || "";
+  } catch(e){
+    alert("无法直接读取剪贴板，请手动粘贴到文本框。");
+  }
+};
+document.getElementById('btnCancel').onclick = closeNewModal;
+document.getElementById('btnBuild').onclick = ()=>{
+  const raw = document.getElementById('taRaw').value.trim();
+  if (!raw) { alert("请粘贴英文原文"); return; }
+  const name = (document.getElementById('nameIpt').value || "").trim() || "自定义稿件";
+  const u = buildUnitsFromRawText(raw);
+  const key = "txt_" + hash(raw).slice(0,8);
+  closeNewModal();
+  loadUnits(u, key, name);
+};
+
+passageSelect.onchange = ()=>{};
+
+/* ========= 初始化 ========= */
+(function init(){
+  refreshPassageSelect();
+  loadBuiltinIfAny();
+  const list = loadJSON(STORE_PREFIX + "list", []);
+  if (!list.length) {
+    feedbackEl.textContent = "提示：点击“＋ 粘贴新原文”开始创建一份听写稿件，或放置 data.js 后点击“加载内置稿件”。";
+  } else {
+    list.sort((a,b)=>b.time-a.time);
+    passageKey = list[0].key;
+    refreshPassageSelect();
+    resumeSaved();
+  }
+})();
+</script>
+</body>
+</html>
