@@ -18,17 +18,31 @@
   .btn.primary:hover{background:#000}
   .small{font-size:13px;color:var(--muted)}
   .ipt{padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;min-width:120px}
-  .word-list{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px;min-height:52px}
-  .word-item{padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;background:#f9fafb;cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+
+  .word-list{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px;min-height:52px;
+    /* 关键：移动端触摸优化，避免抢滚动/系统手势 */
+    touch-action: manipulation;
+  }
+  .word-item{padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;background:#f9fafb;cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
+    /* 禁止长按弹出系统菜单（iOS） */
+    -webkit-touch-callout:none;
+  }
   .word-item.correct{background:var(--ok);border-color:var(--okb)}
   .word-item.wrong{background:var(--bad);border-color:var(--badb)}
+
+  /* 拖拽中的样式（可选） */
+  .drag-ghost{opacity:.6}
+  .drag-chosen{outline:2px solid #93c5fd}
+  .dragging{cursor:grabbing}
+
   #translation{margin-top:8px;padding:10px;background:var(--card);border-radius:8px}
   #translation.hidden{display:none}
   #feedback{margin-top:8px}
   #dictBox{position:fixed;bottom:20px;right:20px;z-index:9999;background:#fff;border:1px solid #d1d5db;padding:12px 14px;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.12);max-width:360px;display:none}
   #dictBox h4{margin:0 0 6px;font-size:14px}
   #dictBox p{margin:0;font-size:14px}
-  /* modal */
+
+  /* 粘贴原文弹窗 */
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:9998}
   .panel{width:min(92%,960px);background:#fff;border-radius:12px;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.18)}
   .panel h3{margin:0 0 8px}
@@ -86,7 +100,7 @@
 <script>
 /* ========= 配置 ========= */
 const MAX_WORDS = 18;               // 每段最多单词数，超出会进一步分块
-const STORE_PREFIX = "dict_train_v4_";
+const STORE_PREFIX = "dict_train_v5_";
 
 /* ========= 状态 ========= */
 let units = [];          // [{en, cn}]
@@ -98,6 +112,7 @@ let wrongUnits = [];
 let selectedVoice = null;
 let passageKey = "default"; // 当前稿件的存储键
 let isTranslating = false;  // 避免重复请求
+let sortable = null;        // ← 关键：全局唯一 Sortable 实例
 
 /* ========= DOM ========= */
 const wordListEl = document.getElementById('wordList');
@@ -206,6 +221,7 @@ function renderSentence() {
   translationEl.textContent = cur.cn || "(此段暂无翻译)";
   translationEl.classList.add("hidden");
 
+  // 渲染单词
   wordListEl.innerHTML = "";
   const scrambled = shuffle(cur.en.split(/\s+/));
   scrambled.forEach(w=>{
@@ -215,22 +231,29 @@ function renderSentence() {
     li.onclick = () => showDefinition(cleanWord(w));
     wordListEl.appendChild(li);
   });
-  new Sortable(wordListEl, {
+
+  // 关键：销毁旧实例，创建新实例，并强制使用回退拖拽（iOS 稳定）
+  if (sortable) { try { sortable.destroy(); } catch(e) {} sortable = null; }
+  sortable = new Sortable(wordListEl, {
+    draggable: '.word-item',
     animation:160,
     delay:120,
     delayOnTouchOnly:true,
     touchStartThreshold:4,
-    fallbackOnBody:true
+    fallbackOnBody:true,
+    forceFallback:true,          // ← 关键：iOS/安卓上更稳
+    ghostClass:'drag-ghost',
+    chosenClass:'drag-chosen',
+    dragClass:'dragging',
   });
 
   progressEl.textContent = `第 ${currentIndex+1} 段 / 共 ${appData.length} 段${inReview ? "（错题复习）":""}（当前稿件：${getPassageName(passageKey)}）`;
   saveProgress();
 }
 
-// 改造：显示/隐藏翻译 —— 若无中文则自动在线翻译并缓存
+// 显示/隐藏翻译 —— 若无中文则自动在线翻译并缓存
 async function toggleTranslation(){
   if (translationEl.classList.contains("hidden")) {
-    // 准备显示：若当前句没有翻译，尝试在线翻译
     const cur = appData[currentIndex];
     if (cur && !cur.cn && !isTranslating) {
       isTranslating = true;
@@ -239,40 +262,29 @@ async function toggleTranslation(){
       translationEl.classList.remove("hidden");
       try {
         const cn = await translateEN2ZH(cur.en);
-        if (cn) {
-          setCurrentCN(cn); // 写回本句并保存
-          translationEl.textContent = cn;
-        } else {
-          translationEl.textContent = "（暂时无法翻译）";
-        }
-      } catch(e){
-        translationEl.textContent = "（翻译出错）";
-      } finally {
-        isTranslating = false;
-        btnToggleCn.disabled = false;
-      }
+        if (cn) { setCurrentCN(cn); translationEl.textContent = cn; }
+        else { translationEl.textContent = "（暂时无法翻译）"; }
+      } catch(e){ translationEl.textContent = "（翻译出错）"; }
+      finally { isTranslating = false; btnToggleCn.disabled = false; }
       return;
     }
   }
   translationEl.classList.toggle("hidden");
 }
 
-// 把翻译结果写回到 units / appData / wrongUnits，并保存
+// 把翻译结果写回数据并保存
 function setCurrentCN(cn){
   const cur = appData[currentIndex];
   if (!cur) return;
   cur.cn = cn;
-  // 同步到 units 中的对应句（按 en 匹配；若重复文本将同步首个匹配）
   const u = units.find(x => x.en === cur.en);
   if (u) u.cn = cn;
-  // 同步错题表里（引用同对象通常已同步；这里冗余保障）
   wrongUnits.forEach(x=>{ if (x.en === cur.en) x.cn = cn; });
   saveProgress();
 }
 
-/* ========= 在线翻译：EN → ZH（浏览器可直接用的免费接口） ========= */
+/* ========= 在线翻译：EN → ZH ========= */
 async function translateEN2ZH(text){
-  // 1) MyMemory（免费、CORS 允许；有速率/质量限制）
   try {
     const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|zh-CN`;
     const res = await fetch(url);
@@ -280,10 +292,10 @@ async function translateEN2ZH(text){
     const cn = j?.responseData?.translatedText;
     if (cn) return cn;
   } catch(e){}
-  // 2) 兜底：直接返回空，界面会提示
   return "";
 }
 
+/* ========= 其他交互 ========= */
 function playSentence() {
   const cur = appData[currentIndex];
   if (!cur) return;
@@ -384,7 +396,7 @@ function getPassageName(key){
 function refreshPassageSelect(){
   const list = loadJSON(STORE_PREFIX + "list", []);
   passageSelect.innerHTML = "";
-  list.forEach(item=>{
+  list.sort((a,b)=>b.time-a.time).forEach(item=>{
     const opt = document.createElement('option');
     opt.value = item.key; opt.textContent = item.name;
     if (item.key === passageKey) opt.selected = true;
@@ -544,6 +556,19 @@ document.getElementById('btnBuild').onclick = ()=>{
 passageSelect.onchange = ()=>{};
 
 /* ========= 初始化 ========= */
+function initVoices(){
+  const vs = speechSynthesis.getVoices();
+  if (!vs || !vs.length) return;
+  selectedVoice =
+    vs.find(v => /male/i.test(v.name) && v.lang?.startsWith('en')) ||
+    vs.find(v => v.name === 'Alex') ||
+    vs.find(v => v.lang === 'en-US') ||
+    vs.find(v => v.lang?.startsWith('en')) ||
+    vs[0];
+}
+initVoices();
+if ('onvoiceschanged' in speechSynthesis) speechSynthesis.onvoiceschanged = initVoices;
+
 (function init(){
   refreshPassageSelect();
   loadBuiltinIfAny();
